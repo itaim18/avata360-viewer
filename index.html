@@ -124,8 +124,16 @@ let path = null, flying = false, t0 = 0;
 const stopFly = () => { flying = false; controls.enabled = true; $("fly").textContent = "Fly the route"; };
 $("fly").onclick = () => { if (flying) return stopFly(); flying = true; t0 = performance.now(); controls.enabled = false; $("fly").textContent = "Stop"; };
 let onFrame = () => {};
+// Camera glide (Overview): a smooth ~1.2 s move instead of a jump, so Spark keeps re-sorting along the way.
+let glide = null;
+const glideTo = (pos, tgt, ms = 1200) => { glide = { p0: camera.position.clone(), t0: controls.target.clone(), p1: pos, t1: tgt, s: performance.now(), ms }; };
 renderer.setAnimationLoop(now => {
   onFrame();
+  if (glide) {
+    const k = Math.min((now - glide.s) / glide.ms, 1), e = k * k * (3 - 2 * k);
+    camera.position.lerpVectors(glide.p0, glide.p1, e); controls.target.lerpVectors(glide.t0, glide.t1, e);
+    if (k === 1) glide = null;
+  }
   if (flying && path) {
     const s = ((now - t0) / 1000) * 8 / path.len;  // 8 m/s, about 5x the drone's 1.7 m/s
     if (s >= 1) stopFly();
@@ -198,7 +206,7 @@ try {
   $("over").disabled = false;
   $("over").onclick = () => {
     stopFly(); const d = Math.max(sz.x, sz.z);
-    camera.position.set(c.x, box.max.y + d * 0.5, c.z + d * 0.3); controls.target.copy(c); controls.update();
+    glideTo(new THREE.Vector3(c.x, box.max.y + d * 0.5, c.z + d * 0.3), c.clone());
   };
   // Start inside the scene near drone height (the canopy was only ever seen from below), looking along the route.
   // Garage: stay at drone height; the ceiling is only ~2 m above it.
