@@ -81,7 +81,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { Line2 } from "three/addons/lines/Line2.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { LineGeometry } from "three/addons/lines/LineGeometry.js";
-import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 
 // claude.ai's CSP blocks fetch() of data: URLs, which is how Spark loads its wasm (page + workers).
 // ponytail: decode base64 data: URLs ourselves; drop this if Spark ever takes wasm bytes directly.
@@ -105,6 +105,7 @@ const GARAGE = location.hash === "#garage", DATA = GARAGE ? "data_garage" : "dat
 addEventListener("hashchange", () => location.reload());
 const status = $("status"), bar = document.querySelector("#bar i");
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.localClippingEnabled = true; const cutPlanes = [];  // indoor cutaway (mesh/points materials share this array)
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 document.body.prepend(renderer.domElement);
 const scene = new THREE.Scene();
@@ -179,7 +180,7 @@ try {
   $("facts").textContent = man.facts;
   $("other").href = GARAGE ? "#forest" : "#garage"; $("other").textContent = GARAGE ? "Forest scene" : "Garage scene";
   if (man.noGarage) $("other").hidden = true;
-  const total = ["splat", "mesh", "points"].reduce((s, k) => s + (man[k]?.bytes || 0), 0);
+  const total = ["splat", "splat_top", "mesh", "points"].reduce((s, k) => s + (man[k]?.bytes || 0), 0);
   let done = 0;
   // flight path + home view
   const pts = man.path.map(p => enu(...p));
@@ -227,23 +228,28 @@ try {
     tex.mapping = THREE.EquirectangularReflectionMapping; tex.colorSpace = THREE.SRGBColorSpace;
     scene.background = tex;
   }
-  // splat
-  const sb = await fetchParts(`${DATA}/splat`, man.splat, "splat", done, total); done += man.splat.bytes;
-  status.textContent = `Decoding ${(man.splat.splats / 1e6).toFixed(1)} M splats…`;
-  const splat = new SplatMesh({ fileBytes: sb, fileType: "spz" });
-  world.add(splat); await splat.initialized; layer("b-splat", splat, true);
-  if (GARAGE) {
-    // Ceiling cutaway: once the camera rises above the ceiling, hide everything above the highest drone pose (+0.25 m)
-    // so the overview shows the parking deck instead of the roof slab. Inside, the ceiling stays.
-    // Splat: Spark SDF edit (plane at the cut height, inverted = above it, opacity x0). Mesh/points: a clipping plane.
-    const cutH = Math.max(...man.path.map(p => p[2])) + 0.25;
-    const edit = new SplatEdit({ rgbaBlendMode: SplatEditRgbaBlendMode.MULTIPLY });
-    const plane = new SplatEditSdf({ type: SplatEditSdfType.PLANE, invert: true, opacity: 1 });
-    plane.position.set(0, 0, cutH); edit.add(plane); splat.add(edit);
-    const clip = [new THREE.Plane(new THREE.Vector3(0, -1, 0), cutH)];
+  // splat (an indoor scene comes as two parts split at its cut plane, deck + roof; see the cutaway below)
+  const splats = new THREE.Group(); world.add(splats);
+  for (const k of ["splat", "splat_top"]) {
+    if (!man[k]) continue;
+    const sb = await fetchParts(`${DATA}/${k}`, man[k], "splat", done, total); done += man[k].bytes;
+    status.textContent = `Decoding ${(man[k].splats / 1e6).toFixed(1)} M splats…`;
+    const m = new SplatMesh({ fileBytes: sb, fileType: "spz" }); m.name = k;
+    splats.add(m); await m.initialized;
+  }
+  layer("b-splat", splats, true);
+  if (man.cut) {
+    // Cutaway: once the camera is above the roof, hide everything above the cut plane z = A x + B y + C (ENU m), so the
+    // overview shows the deck instead of the roof slab. Inside, the roof stays. Splat: the roof is its own SplatMesh
+    // (Spark 0.1.10 SDF edits never took effect on it). Mesh/points: a per-material clipping plane, so the route line stays whole.
+    const [A, B, C] = man.cut, n = new THREE.Vector3(-A, -B, 1).normalize();
+    const above = v => n.dot(new THREE.Vector3(v.x, -v.z, v.y - C));  // three.js point -> metres above the cut
+    const n3 = new THREE.Vector3(n.x, n.z, -n.y), plane = new THREE.Plane(n3.clone().negate(), n3.y * C);
+    const top = splats.getObjectByName("splat_top");
     onFrame = () => {
-      const on = camera.position.y > cutH + 0.5;
-      plane.opacity = on ? 0 : 1; renderer.clippingPlanes = on ? clip : [];
+      const on = above(camera.position) > 1.6;  // the slab top is ~1 m above the cut; inside, the camera stays < 0.5 m above it
+      if (top) top.visible = !on;
+      cutPlanes.length = 0; if (on) cutPlanes.push(plane);
     };
   }
   // mesh
@@ -257,7 +263,7 @@ try {
       if (c) { const lin = new Float32Array(c.count * 3); for (let i = 0; i < c.count; i++) { lin[i * 3] = Math.pow(c.getX(i), 2.2); lin[i * 3 + 1] = Math.pow(c.getY(i), 2.2); lin[i * 3 + 2] = Math.pow(c.getZ(i), 2.2); }
                o.geometry.setAttribute("color", new THREE.BufferAttribute(lin, 3)); }
       const map = o.material.map;  // textured mesh: keep the photo texture; else per-vertex colours (lighting baked in, so unlit)
-      o.material = map ? new THREE.MeshBasicMaterial({ map, side: THREE.DoubleSide }) : new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+      o.material = map ? new THREE.MeshBasicMaterial({ map, side: THREE.DoubleSide, clippingPlanes: cutPlanes }) : new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, clippingPlanes: cutPlanes });
     });  // colours are photo colours (lighting baked in), so unlit
     world.add(gltf.scene); layer("b-mesh", gltf.scene, false);
   }
@@ -271,7 +277,7 @@ try {
       C[i * 3] = Math.pow(pb[o + 6] / 255, 2.2); C[i * 3 + 1] = Math.pow(pb[o + 7] / 255, 2.2); C[i * 3 + 2] = Math.pow(pb[o + 8] / 255, 2.2);  // sRGB -> linear
     }
     const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(P, 3)); g.setAttribute("color", new THREE.BufferAttribute(C, 3));
-    const cloud = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.05, vertexColors: true }));
+    const cloud = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.05, vertexColors: true, clippingPlanes: cutPlanes }));
     world.add(cloud); layer("b-pts", cloud, false);
   }
   status.textContent = man.summary;
