@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="DJI Avata 360 flights reconstructed as Gaussian splats, meshes and point clouds: a eucalyptus park and a parking garage, with the drone's flight path.">
+<style>html,body{margin:0;height:100%;background:#0c1110}[hidden]{display:none!important}</style>
+</head>
+<body>
+<title>Avata 360 Eucalyptus Park</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* Layout: full-bleed 3D canvas; one info plate top-left (title, status, layer toggles), help plate bottom-left.
+     Single dark look on purpose: a 3D scan reads best on a night ground. */
+  :root {
+    --bg: #0c1110; --plate: rgba(14, 20, 18, 0.80); --fg: #e4ece7; --muted: #93a39b;
+    --leaf: #8fbfa9; --grass: #d8b46a; --line: rgba(228, 236, 231, 0.14);
+    --ui: "Instrument Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--ui); overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  .plate { position: fixed; background: var(--plate); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; backdrop-filter: blur(6px); }
+  #info { top: calc(12px + env(safe-area-inset-top, 0px)); left: max(12px, env(safe-area-inset-left, 0px));
+    max-width: min(360px, calc(100% - 24px)); display: grid; gap: 8px; }
+  #info h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; text-wrap: balance; }
+  .meta { margin: 0; font: 11.5px/1.45 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+  #status { color: var(--fg); }
+  #bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  #bar i { display: block; height: 100%; width: 0; background: var(--leaf); transition: width 0.2s; }
+  .layers { display: flex; flex-wrap: wrap; gap: 6px; }
+  .layers button, #fly, #over { font: 600 12px var(--ui); color: var(--fg); background: transparent; border: 1px solid var(--line);
+    border-radius: 4px; padding: 5px 9px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+  .layers button[aria-pressed="true"] { border-color: var(--leaf); background: rgba(143, 191, 169, 0.14); }
+  .layers button:disabled { opacity: 0.4; cursor: default; }
+  .layers button:focus-visible, #fly:focus-visible, #over:focus-visible { outline: 2px solid var(--leaf); outline-offset: 2px; }
+  .sw { width: 8px; height: 8px; border-radius: 2px; background: var(--leaf); }
+  .sw.mesh { background: var(--fg); } .sw.pts { background: var(--grass); } .sw.path { background: linear-gradient(90deg, #3ddc84, #f2a03d, #e5484d); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .switch { color: var(--leaf); font-size: 12px; }
+  #help { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); left: max(12px, env(safe-area-inset-left, 0px));
+    font-size: 12px; color: var(--muted); max-width: calc(100% - 24px); pointer-events: none; }
+  #help b { color: var(--fg); font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) { #bar i { transition: none; } }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono&family=Instrument+Sans:wght@400;600&display=swap">
+
+<div id="info" class="plate">
+  <h1 id="title">Eucalyptus park · DJI Avata 360</h1>
+  <p class="meta" id="facts">22 May 2026 · 5 min 40 s flight · 0.3–5 m above ground</p>
+  <p class="meta" id="status">Starting…</p>
+  <div id="bar"><i></i></div>
+  <div class="layers" role="group" aria-label="Layers">
+    <button id="b-splat" aria-pressed="true" disabled><span class="sw"></span>Splat</button>
+    <button id="b-mesh" aria-pressed="false" disabled><span class="sw mesh"></span>Mesh</button>
+    <button id="b-pts" aria-pressed="false" disabled><span class="sw pts"></span>Points</button>
+    <button id="b-path" aria-pressed="true" disabled><span class="sw path"></span>Flight path</button>
+  </div>
+  <div class="row"><button id="fly" disabled>Fly the route</button><button id="over" disabled>Overview</button><a id="other" class="switch" href="#garage">Garage scene</a></div>
+</div>
+<div id="help" class="plate"><b>Drag</b> orbit · <b>Right-drag</b> pan · <b>Wheel</b> zoom · <b>R</b> reset · <b>Esc</b> stop flight</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.178.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.178.0/examples/jsm/",
+  "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@0.1.10/dist/spark.module.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { Line2 } from "three/addons/lines/Line2.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
+import { LineGeometry } from "three/addons/lines/LineGeometry.js";
+import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf, SplatEditSdfType, SplatEditRgbaBlendMode } from "@sparkjsdev/spark";
+
+// claude.ai's CSP blocks fetch() of data: URLs, which is how Spark loads its wasm (page + workers).
+// ponytail: decode base64 data: URLs ourselves; drop this if Spark ever takes wasm bytes directly.
+function patchDataFetch() {
+  const orig = self.fetch.bind(self);
+  self.fetch = (u, o) => {
+    const s = String(u), c = s.indexOf(",");
+    if (!s.startsWith("data:") || !s.slice(0, c).endsWith(";base64")) return orig(u, o);
+    const bin = atob(s.slice(c + 1)), a = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+    return Promise.resolve(new Response(a, { headers: { "Content-Type": s.slice(5, s.indexOf(";")) } }));
+  };
+}
+patchDataFetch();
+const origObjURL = URL.createObjectURL.bind(URL);
+URL.createObjectURL = b => origObjURL(b instanceof Blob && /javascript/.test(b.type) ? new Blob([`(${patchDataFetch})();\n`, b], { type: b.type }) : b);
+
+const $ = id => document.getElementById(id);
+// Two scenes: the forest flight (default) and the indoor garage flight (#garage).
+const GARAGE = location.hash === "#garage", DATA = GARAGE ? "data_garage" : "data";
+addEventListener("hashchange", () => location.reload());
+const status = $("status"), bar = document.querySelector("#bar i");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0c1110);
+scene.add(new SparkRenderer({ renderer }));
+scene.add(new THREE.HemisphereLight(0xdfeee6, 0x3a3226, 2.2));
+const camera = new THREE.PerspectiveCamera(60, 1, 0.05, 600);
+// Data is local ENU metres (x east, y north, z up); three.js is y-up, so everything hangs off one rotated group.
+const world = new THREE.Group(); world.rotation.x = -Math.PI / 2; scene.add(world);
+const enu = (e, n, u) => new THREE.Vector3(e, u, -n);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.maxDistance = 250;
+let home = () => {};
+addEventListener("keydown", e => { if (e.key === "r" || e.key === "R") { stopFly(); home(); } if (e.key === "Escape") stopFly(); });
+let pathMat = null;
+const resize = () => { renderer.setSize(innerWidth, innerHeight, false); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); pathMat?.resolution.set(innerWidth, innerHeight); };
+addEventListener("resize", resize); resize();
+
+// ---- flight replay along the recorded trajectory
+let path = null, flying = false, t0 = 0;
+const stopFly = () => { flying = false; controls.enabled = true; $("fly").textContent = "Fly the route"; };
+$("fly").onclick = () => { if (flying) return stopFly(); flying = true; t0 = performance.now(); controls.enabled = false; $("fly").textContent = "Stop"; };
+let onFrame = () => {};
+renderer.setAnimationLoop(now => {
+  onFrame();
+  if (flying && path) {
+    const s = ((now - t0) / 1000) * 8 / path.len;  // 8 m/s, about 5x the drone's 1.7 m/s
+    if (s >= 1) stopFly();
+    else {
+      const p = path.curve.getPointAt(s), q = path.curve.getPointAt(Math.min(s + 0.004, 1));
+      camera.position.copy(p).add(new THREE.Vector3(0, 0.6, 0));
+      camera.lookAt(q.x, p.y + 0.3, q.z); controls.target.copy(q);
+    }
+  } else controls.update();
+  renderer.render(scene, camera);
+});
+
+// ---- data loading (parts are named .wasm because artifacts don't serve .bin)
+async function fetchParts(dir, meta, label, done0, total) {
+  let got = 0;
+  const parts = await Promise.all(Array.from({ length: meta.parts }, async (_, i) => {
+    const res = await fetch(`${dir}/p${String(i).padStart(2, "0")}.wasm`);
+    if (!res.ok) throw new Error(`${label} part ${i} returned ${res.status}`);
+    const reader = res.body.getReader(), chunks = [];
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      chunks.push(value); got += value.length;
+      bar.style.width = (100 * (done0 + got) / total).toFixed(1) + "%";
+      status.textContent = `Downloading ${label}: ${(got / 1e6).toFixed(0)} / ${(meta.bytes / 1e6).toFixed(0)} MB`;
+    }
+    return new Blob(chunks);
+  }));
+  return new Uint8Array(await new Blob(parts).arrayBuffer());
+}
+const layer = (id, obj, on) => {
+  const b = $(id); b.disabled = false; b.setAttribute("aria-pressed", String(on)); obj.visible = on;
+  b.onclick = () => { const v = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", String(v)); obj.visible = v; };
+};
+
+try {
+  const man = await (await fetch(`${DATA}/manifest.json`)).json();
+  $("title").textContent = man.title || $("title").textContent;
+  $("facts").textContent = man.facts;
+  $("other").href = GARAGE ? "#forest" : "#garage"; $("other").textContent = GARAGE ? "Forest scene" : "Garage scene";
+  if (man.noGarage) $("other").hidden = true;
+  const total = ["splat", "mesh", "points"].reduce((s, k) => s + (man[k]?.bytes || 0), 0);
+  let done = 0;
+  // flight path + home view
+  const pts = man.path.map(p => enu(...p));
+  const curve = new THREE.CatmullRomCurve3(pts);
+  path = { curve, len: curve.getLength() };
+  // The route as a constant-width screen-space line coloured by time: green at takeoff, orange midway, red at landing.
+  const trail = new THREE.Group(), SEG = 3000, pos = [], col = [], tc = new THREE.Color();
+  const c0 = new THREE.Color(0x3ddc84), c1 = new THREE.Color(0xf2a03d), c2 = new THREE.Color(0xe5484d);
+  curve.getSpacedPoints(SEG).forEach((q, i) => {
+    const t = i / SEG; t < 0.5 ? tc.lerpColors(c0, c1, t * 2) : tc.lerpColors(c1, c2, t * 2 - 1);
+    pos.push(q.x, q.y, q.z); col.push(tc.r, tc.g, tc.b);
+  });
+  const lg = new LineGeometry(); lg.setPositions(pos); lg.setColors(col);
+  pathMat = new LineMaterial({ linewidth: 3.5, vertexColors: true }); pathMat.resolution.set(innerWidth, innerHeight);
+  trail.add(new Line2(lg, pathMat));
+  // START above its point, END below its point: the garage flight is a loop, so the two would otherwise overlap.
+  const tag = (text, color, p, cy) => {
+    const cv = document.createElement("canvas"); cv.width = 256; cv.height = 96; const g = cv.getContext("2d");
+    g.fillStyle = color; g.beginPath(); g.roundRect(8, 8, 240, 80, 18); g.fill();
+    g.fillStyle = "#0c1110"; g.font = "700 46px system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(text, 128, 52);
+    const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }));
+    sp.scale.set(0.075, 0.028, 1); sp.center.set(0.5, cy); sp.position.copy(p); sp.renderOrder = 10; trail.add(sp);
+  };
+  tag("START", "#3ddc84", pts[0], -0.35); tag("END", "#e5484d", pts[pts.length - 1], 1.35);
+  scene.add(trail); layer("b-path", trail, true); $("fly").disabled = false;
+  const box = new THREE.Box3().setFromPoints(pts), c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+  // Overview: the whole route from above at an angle (the garage cutaway opens the ceiling once the camera is above it).
+  $("over").disabled = false;
+  $("over").onclick = () => {
+    stopFly(); const d = Math.max(sz.x, sz.z);
+    camera.position.set(c.x, box.max.y + d * 0.5, c.z + d * 0.3); controls.target.copy(c); controls.update();
+  };
+  // Start inside the scene near drone height (the canopy was only ever seen from below), looking along the route.
+  // Garage: stay at drone height; the ceiling is only ~2 m above it.
+  const lift = GARAGE ? 0.45 : 1.2;  // garage: just above the route line, well under the ~4 m ceiling
+  home = () => {
+    const p = curve.getPointAt(0.3), q = curve.getPointAt(0.33);
+    camera.position.copy(p).add(new THREE.Vector3(0, lift, 0)); controls.target.set(q.x, p.y + lift / 2, q.z); controls.update();
+  };
+  if (GARAGE) controls.maxDistance = 80;
+  home();
+  if (man.sky) {
+    const tex = await new THREE.TextureLoader().loadAsync(man.sky);
+    tex.mapping = THREE.EquirectangularReflectionMapping; tex.colorSpace = THREE.SRGBColorSpace;
+    scene.background = tex;
+  }
+  // splat
+  const sb = await fetchParts(`${DATA}/splat`, man.splat, "splat", done, total); done += man.splat.bytes;
+  status.textContent = `Decoding ${(man.splat.splats / 1e6).toFixed(1)} M splats…`;
+  const splat = new SplatMesh({ fileBytes: sb, fileType: "spz" });
+  world.add(splat); await splat.initialized; layer("b-splat", splat, true);
+  if (GARAGE) {
+    // Ceiling cutaway: once the camera rises above the ceiling, hide everything above the highest drone pose (+0.25 m)
+    // so the overview shows the parking deck instead of the roof slab. Inside, the ceiling stays.
+    // Splat: Spark SDF edit (plane at the cut height, inverted = above it, opacity x0). Mesh/points: a clipping plane.
+    const cutH = Math.max(...man.path.map(p => p[2])) + 0.25;
+    const edit = new SplatEdit({ rgbaBlendMode: SplatEditRgbaBlendMode.MULTIPLY });
+    const plane = new SplatEditSdf({ type: SplatEditSdfType.PLANE, invert: true, opacity: 1 });
+    plane.position.set(0, 0, cutH); edit.add(plane); splat.add(edit);
+    const clip = [new THREE.Plane(new THREE.Vector3(0, -1, 0), cutH)];
+    onFrame = () => {
+      const on = camera.position.y > cutH + 0.5;
+      plane.opacity = on ? 0 : 1; renderer.clippingPlanes = on ? clip : [];
+    };
+  }
+  // mesh
+  if (man.mesh) {
+    const mb = await fetchParts(`${DATA}/mesh`, man.mesh, "mesh", done, total); done += man.mesh.bytes;
+    status.textContent = "Building mesh…";
+    const gltf = await new GLTFLoader().parseAsync(mb.buffer, "");
+    gltf.scene.traverse(o => {
+      if (!o.isMesh) return;
+      const c = o.geometry.getAttribute("color");  // photo colours are sRGB; three expects linear vertex colours
+      if (c) { const lin = new Float32Array(c.count * 3); for (let i = 0; i < c.count; i++) { lin[i * 3] = Math.pow(c.getX(i), 2.2); lin[i * 3 + 1] = Math.pow(c.getY(i), 2.2); lin[i * 3 + 2] = Math.pow(c.getZ(i), 2.2); }
+               o.geometry.setAttribute("color", new THREE.BufferAttribute(lin, 3)); }
+      const map = o.material.map;  // textured mesh: keep the photo texture; else per-vertex colours (lighting baked in, so unlit)
+      o.material = map ? new THREE.MeshBasicMaterial({ map, side: THREE.DoubleSide }) : new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    });  // colours are photo colours (lighting baked in), so unlit
+    world.add(gltf.scene); layer("b-mesh", gltf.scene, false);
+  }
+  // points: int16 xyz (pos = centre + q * scale) + uint8 rgb, packed per point
+  if (man.points) {
+    const pb = await fetchParts(`${DATA}/points`, man.points, "points", done, total); done += man.points.bytes;
+    const n = man.points.count, dv = new DataView(pb.buffer), P = new Float32Array(n * 3), C = new Float32Array(n * 3);
+    const [cx, cy, cz] = man.points.center, s = man.points.scale;
+    for (let i = 0, o = 0; i < n; i++, o += 9) {
+      P[i * 3] = cx + dv.getInt16(o, true) * s; P[i * 3 + 1] = cy + dv.getInt16(o + 2, true) * s; P[i * 3 + 2] = cz + dv.getInt16(o + 4, true) * s;
+      C[i * 3] = Math.pow(pb[o + 6] / 255, 2.2); C[i * 3 + 1] = Math.pow(pb[o + 7] / 255, 2.2); C[i * 3 + 2] = Math.pow(pb[o + 8] / 255, 2.2);  // sRGB -> linear
+    }
+    const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(P, 3)); g.setAttribute("color", new THREE.BufferAttribute(C, 3));
+    const cloud = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.05, vertexColors: true }));
+    world.add(cloud); layer("b-pts", cloud, false);
+  }
+  status.textContent = man.summary;
+  $("bar").hidden = true;
+} catch (err) {
+  status.textContent = `Could not load the scene: ${err.message}. Reload the page to try again.`;
+}
+</script>
+
+</body>
+</html>
